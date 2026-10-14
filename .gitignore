@@ -5,12 +5,17 @@
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/
+.ruff_cache/
 venv/
+.pytest_cache/
+.ruff_cache/
 
 # dbt
 dbt/target/
 dbt/dbt_packages/
 dbt/logs/
+dbt/.user.yml
 
 # misc
 *.log
