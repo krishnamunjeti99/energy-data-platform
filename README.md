@@ -21,7 +21,7 @@ We build it as a thin vertical slice first, then grow outward.
 
 - [x] Step 1 — Postgres running in Docker
 - [x] Step 2 — data generator -> bronze
-- [ ] Step 3 — dbt model bronze -> gold (+ test)
+- [x] Step 3 — dbt: bronze -> silver -> gold, with tests
 - [ ] Step 4 — chart from gold
 
 ---
@@ -100,3 +100,55 @@ from bronze.meter_reads group by 1 order by 1;
 select meter_id, reading_ts, count(*)
 from bronze.meter_reads group by 1, 2 having count(*) > 1;
 ```
+
+---
+
+## Step 3 — transform with dbt (bronze -> silver -> gold)
+
+The `dbt/` project turns raw reads into analysis-ready tables:
+
+| Layer | Model | What it does |
+|---|---|---|
+| reference | `stations`, `meters` (seeds) | Station and meter master data from CSV |
+| silver | `stg_meter_reads` (view) | Removes duplicate reads: one row per meter per block |
+| silver | `silver_interval_energy` | Energy per interval from register deltas (`lag()`), flags gap-fills |
+| gold | `gold_daily_generation` | Daily generation, auxiliary %, capacity factor, data completeness per station |
+
+**Why register deltas?** Meters report a cumulative total, not per-block energy.
+Interval energy is `register - previous register`. A missing read loses no
+energy: the next read that arrives covers the gap (`blocks_covered > 1`), and
+the row is flagged `is_gap_fill` instead of being dropped or guessed.
+
+**Tests** (run with every build):
+- `unique` / `not_null` keys, `accepted_values` on meter type, `relationships` to the seeds
+- `assert_interval_energy_not_negative`: a cumulative register can never go backwards
+- `assert_one_row_per_station_per_day`: the grain of the gold table
+- `assert_aux_pct_within_bounds`: business rule, auxiliary use above 10% means bad metering
+- `warn_low_completeness`: warning (not failure) when a station sends < 95% of expected reads
+- source freshness on `bronze.meter_reads`
+
+```bash
+# seeds + models + tests, in dependency order
+docker compose run --rm dbt build
+
+# check that bronze data is recent
+docker compose run --rm dbt source freshness
+
+# browse docs and the lineage graph at http://localhost:8080
+docker compose run --rm dbt docs generate
+docker compose run --rm --service-ports dbt docs serve --host 0.0.0.0 --port 8080
+```
+
+Query the result:
+
+```sql
+select reading_date, station_name, generation_kwh, aux_pct,
+       capacity_factor_pct, completeness_pct
+from gold.gold_daily_generation
+order by reading_date desc, station_name
+limit 9;
+```
+
+dbt runs in its own container as your WSL user (`HOST_UID`, default 1000). If
+`id -u` prints something other than 1000, add `HOST_UID=<that number>` and
+`HOST_GID=<id -g>` to `.env`.

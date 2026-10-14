@@ -1,0 +1,13 @@
+version: 2
+
+seeds:
+  - name: stations
+    description: Reference list of generating stations.
+    columns:
+      - name: station_id
+        data_tests: [unique, not_null]
+  - name: meters
+    description: Reference list of meters and the station each belongs to.
+    columns:
+      - name: meter_id
+        data_tests: [unique, not_null]
