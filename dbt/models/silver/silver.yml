@@ -1,0 +1,43 @@
+version: 2
+
+models:
+  - name: stg_meter_reads
+    description: Bronze reads with duplicates removed. One row per meter per block.
+    columns:
+      - name: read_key
+        description: Meter id + block end time (UTC). Unique per read.
+        data_tests:
+          - unique
+          - not_null
+      - name: meter_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: ['GEN', 'AUX']
+      - name: meter_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('meters')
+                field: meter_id
+
+  - name: silver_interval_energy
+    description: >
+      Energy per meter per interval, from register deltas. Rows after a gap
+      cover several blocks (blocks_covered > 1, is_gap_fill = true).
+    columns:
+      - name: read_key
+        data_tests:
+          - unique
+          - not_null
+      - name: interval_kwh
+        description: kWh since the previous read. Never negative.
+        data_tests:
+          - not_null
+      - name: blocks_covered
+        description: Number of 15-minute blocks this interval spans (1 = no gap).
+      - name: reading_date
+        description: India-time date of the block start.
+        data_tests:
+          - not_null
