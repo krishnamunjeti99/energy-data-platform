@@ -1,0 +1,8 @@
+meter_id,station_id,meter_type,description
+MTR-HYD-GEN-01,STN-HYD-01,GEN,Unit 1 generator export
+MTR-HYD-GEN-02,STN-HYD-01,GEN,Unit 2 generator export
+MTR-HYD-AUX-01,STN-HYD-01,AUX,Station auxiliary consumption
+MTR-SOL-GEN-01,STN-SOL-01,GEN,Inverter export
+MTR-SOL-AUX-01,STN-SOL-01,AUX,Station auxiliary consumption
+MTR-WND-GEN-01,STN-WND-01,GEN,Turbine export
+MTR-WND-AUX-01,STN-WND-01,AUX,Station auxiliary consumption

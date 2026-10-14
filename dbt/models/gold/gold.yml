@@ -1,0 +1,27 @@
+version: 2
+
+models:
+  - name: gold_daily_generation
+    description: Daily generation, auxiliary consumption and data completeness per station.
+    columns:
+      - name: reading_date
+        data_tests: [not_null]
+      - name: station_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stations')
+                field: station_id
+      - name: generation_kwh
+        description: Gross energy generated (sum of GEN meters).
+      - name: auxiliary_kwh
+        description: Energy the station consumed itself (AUX meter).
+      - name: net_export_kwh
+        description: generation_kwh - auxiliary_kwh.
+      - name: aux_pct
+        description: Auxiliary consumption as a % of generation.
+      - name: capacity_factor_pct
+        description: Generation as a % of what the station could produce at full output all day.
+      - name: completeness_pct
+        description: Reads received as a % of reads expected (96 per meter per day).

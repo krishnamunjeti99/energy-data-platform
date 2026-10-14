@@ -1,0 +1,4 @@
+station_id,station_name,source,capacity_mw
+STN-HYD-01,Riverbend Hydro,hydro,120
+STN-SOL-01,Sunfield Solar,solar,50
+STN-WND-01,Windridge Wind,wind,75

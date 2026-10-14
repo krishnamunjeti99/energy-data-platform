@@ -1,0 +1,12 @@
+[theme]
+# Neutral accent so filter chips don't compete with (or look like) data colours
+primaryColor = "#6b6a66"
+
+[client]
+toolbarMode = "minimal"   # hide the "Deploy" button
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = true
