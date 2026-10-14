@@ -22,7 +22,7 @@ We build it as a thin vertical slice first, then grow outward.
 - [x] Step 1 — Postgres running in Docker
 - [x] Step 2 — data generator -> bronze
 - [x] Step 3 — dbt: bronze -> silver -> gold, with tests
-- [ ] Step 4 — chart from gold
+- [x] Step 4 — dashboard on the gold layer
 
 ---
 
@@ -152,3 +152,37 @@ limit 9;
 dbt runs in its own container as your WSL user (`HOST_UID`, default 1000). If
 `id -u` prints something other than 1000, add `HOST_UID=<that number>` and
 `HOST_GID=<id -g>` to `.env`.
+
+---
+
+## Step 4 — dashboard on the gold layer
+
+`dashboard/app.py` is a Streamlit app that reads only from
+`gold.gold_daily_generation`. All business logic lives in dbt; the dashboard
+just presents it.
+
+- **Headline numbers:** generation, net export, auxiliary consumption and data
+  completeness for the selected range. Ratios are weighted by energy, not
+  averaged per day, so a low-output day doesn't count as much as a full one.
+- **Daily generation** and **auxiliary consumption %** per station, as two
+  separate charts (one measure per chart, no dual axes), with a hover crosshair
+  listing every station's value for the day.
+- **Daily detail** table with capacity factor, completeness and gap fills.
+- Filters for date range and stations. Each station keeps its colour when
+  others are filtered out; the palette is colour-blind validated, with light
+  and dark variants.
+
+```bash
+docker compose up -d dashboard
+# open http://localhost:8501
+```
+
+If port 8501 is taken, set `DASHBOARD_PORT=8502` (or any free port) in `.env`.
+
+After loading new data, refresh the whole pipeline with:
+
+```bash
+docker compose run --rm generator --days 1   # next day of reads into bronze
+docker compose run --rm dbt build            # rebuild silver + gold, run tests
+# the dashboard picks up the new gold data within a minute
+```
