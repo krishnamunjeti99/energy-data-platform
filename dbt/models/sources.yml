@@ -1,0 +1,20 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw, append-only data exactly as it arrived.
+    schema: bronze
+    tables:
+      - name: meter_reads
+        description: >
+          15-minute meter reads loaded by the generator. May contain duplicate
+          reads and missing blocks.
+        loaded_at_field: ingested_at
+        freshness:
+          warn_after: {count: 1, period: day}
+          error_after: {count: 3, period: day}
+        columns:
+          - name: kwh_register
+            description: Cumulative energy register in kWh. Only ever increases.
+          - name: reading_ts
+            description: End of the 15-minute block the read belongs to.
