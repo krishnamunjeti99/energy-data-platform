@@ -1,5 +1,7 @@
 # Energy Data Platform
 
+[![CI](https://github.com/krishnamunjeti99/energy-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/krishnamunjeti99/energy-data-platform/actions/workflows/ci.yml)
+
 An end-to-end energy-meter data platform: a generator produces 15-minute meter
 reads, they land in a Postgres **bronze** layer, dbt transforms them into a
 **gold** layer, and a chart (later, a BI dashboard and an analyst agent) reads
@@ -23,6 +25,7 @@ We build it as a thin vertical slice first, then grow outward.
 - [x] Step 2 — data generator -> bronze
 - [x] Step 3 — dbt: bronze -> silver -> gold, with tests
 - [x] Step 4 — dashboard on the gold layer
+- [x] Step 5 — CI: lint, unit tests, end-to-end pipeline test on every PR
 
 ---
 
@@ -185,4 +188,25 @@ After loading new data, refresh the whole pipeline with:
 docker compose run --rm generator --days 1   # next day of reads into bronze
 docker compose run --rm dbt build            # rebuild silver + gold, run tests
 # the dashboard picks up the new gold data within a minute
+```
+
+---
+
+## Step 5 — continuous integration (GitHub Actions)
+
+`.github/workflows/ci.yml` runs on every pull request and every push to `main`:
+
+| Job | What it proves |
+|---|---|
+| **Lint + unit tests** | `ruff` passes; generator logic is correct (every block present in clean mode, registers never go backwards, anomalies are injected, same seed gives same data, solar is dark at night) |
+| **End-to-end pipeline** | Against a fresh Postgres: generate 30 days, run an incremental day, `dbt build` (all models + 20 tests), source freshness, and a smoke test that the dashboard renders from gold |
+| **Docker images build** | Every Dockerfile still builds |
+
+Run the same checks locally before pushing:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-dev.txt
+ruff check .
+pytest            # database tests skip unless POSTGRES_HOST is set
 ```

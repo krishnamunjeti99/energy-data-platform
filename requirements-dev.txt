@@ -1,0 +1,8 @@
+# Everything CI needs in one environment: the app code's dependencies plus
+# dbt and the test/lint tools. Versions are pinned so CI is reproducible.
+-r generator/requirements.txt
+-r dashboard/requirements.txt
+dbt-core==1.12.5
+dbt-postgres==1.11.0
+ruff==0.17.0
+pytest==9.1.1

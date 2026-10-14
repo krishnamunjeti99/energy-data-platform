@@ -1,0 +1,11 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# pyflakes, pycodestyle errors, import sorting, and common bug patterns
+select = ["E", "F", "I", "B"]
+ignore = ["E501"]   # long SQL strings are fine
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
