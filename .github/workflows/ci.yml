@@ -84,8 +84,8 @@ jobs:
       - name: Generate 30 days of meter reads into bronze
         run: python generator/generate_meter_reads.py --days 30
 
-      - name: Incremental load (continues from the last day)
-        run: python generator/generate_meter_reads.py --days 1
+      - name: Catch-up load is a no-op when bronze is current (safe to rerun)
+        run: python generator/generate_meter_reads.py --catch-up | tee catchup.log && grep -q "Nothing to load" catchup.log
 
       - name: dbt build (seeds, models, tests)
         working-directory: dbt
@@ -97,6 +97,27 @@ jobs:
 
       - name: Dashboard renders against gold
         run: pytest -v tests/test_dashboard.py
+
+  airflow-dag:
+    name: Airflow DAG loads and has the right shape
+    runs-on: ubuntu-latest
+    needs: lint-and-unit-tests
+    env:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Airflow (official constraints) + pytest
+        run: |
+          pip install "apache-airflow[postgres]==3.3.2" pytest==9.1.1 \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt"
+
+      - name: DAG tests
+        run: pytest -v tests/test_dag.py
 
   docker-build:
     name: Docker images build

@@ -23,7 +23,8 @@ Usage (locally, from the repo root, reads .env):
 
 Run it again with no --start and it continues from the last loaded day, with
 registers carrying on from their last values, so it also works as a daily
-incremental load.
+incremental load. --catch-up loads exactly the missing days up to yesterday and
+is a no-op when bronze is current, which makes it safe for a scheduler to rerun.
 """
 
 from __future__ import annotations
@@ -278,6 +279,10 @@ def parse_args(argv=None):
     p.add_argument("--clean", action="store_true", help="no injected anomalies")
     p.add_argument("--reset", action="store_true", help="empty bronze.meter_reads before loading")
     p.add_argument("--dry-run", action="store_true", help="generate and summarise, no database")
+    p.add_argument("--catch-up", action="store_true",
+                   help="load every missing day up to yesterday (India time) and do nothing "
+                        "if bronze is already current. Safe to rerun: used by the Airflow DAG. "
+                        "On an empty table, loads the last --days days.")
     return p.parse_args(argv)
 
 
@@ -301,7 +306,7 @@ def main(argv=None) -> int:
         return 2
 
     if args.dry_run:
-        start = args.start or (date.today() - timedelta(days=args.days))
+        start = args.start or (datetime.now(IST).date() - timedelta(days=args.days))
         rng = random.Random(f"{args.seed}-{start}")
         rows, stats, _ = generate_reads(start, args.days, initial_registers(rng),
                                         rng, not args.clean)
@@ -327,7 +332,21 @@ def main(argv=None) -> int:
         if last_ts and last_ts.astimezone(IST).time() == time(0, 0):
             last_day = last_day - timedelta(days=1)
 
-        if args.start:
+        days = args.days
+        if args.catch_up:
+            if args.start:
+                print("ERROR: --catch-up and --start can't be combined.", file=sys.stderr)
+                return 2
+            yesterday = datetime.now(IST).date() - timedelta(days=1)
+            if last_day is None:
+                start = yesterday - timedelta(days=days - 1)
+            elif last_day >= yesterday:
+                print(f"Bronze is already current (data up to {last_day}). Nothing to load.")
+                return 0
+            else:
+                start = last_day + timedelta(days=1)
+                days = (yesterday - last_day).days
+        elif args.start:
             start = args.start
             if last_day and start <= last_day:
                 print(f"ERROR: bronze already has data up to {last_day}. Pick a --start "
@@ -336,20 +355,20 @@ def main(argv=None) -> int:
                 return 1
         else:
             start = (last_day + timedelta(days=1)) if last_day \
-                else date.today() - timedelta(days=args.days)
+                else datetime.now(IST).date() - timedelta(days=args.days)
 
         rng = random.Random(f"{args.seed}-{start}")
         if not registers:
             registers = initial_registers(rng)
 
-        rows, stats, _ = generate_reads(start, args.days, registers, rng, not args.clean)
+        rows, stats, _ = generate_reads(start, days, registers, rng, not args.clean)
         batch_id = uuid.uuid4()
         copy_rows(conn, rows, batch_id)
         conn.commit()
 
         total = conn.execute("SELECT count(*) FROM bronze.meter_reads").fetchone()[0]
 
-    print_summary(start, args.days, stats)
+    print_summary(start, days, stats)
     print(f"Batch id     : {batch_id}")
     print(f"Table total  : {total:,} rows in bronze.meter_reads")
     return 0
