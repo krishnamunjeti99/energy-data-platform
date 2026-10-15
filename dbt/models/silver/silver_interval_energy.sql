@@ -1,3 +1,12 @@
+{{
+    config(
+        materialized='incremental',
+        unique_key='read_key',
+        incremental_strategy='merge',
+        on_schema_change='fail'
+    )
+}}
+
 -- Interval energy per meter, derived from the cumulative register.
 --
 -- A meter reports a running total (kwh_register), not the energy of each block.
@@ -6,10 +15,22 @@
 -- Because the register is cumulative, a missing read loses no energy: the next
 -- read that does arrive covers the gap (blocks_covered > 1). We keep that energy
 -- and flag the row, rather than dropping or guessing.
+--
+-- Incremental: each run re-processes only the last `silver_lookback_days` of
+-- reads and merges them on read_key. The look-back lets lag() see the previous
+-- read across the boundary, and absorbs reads that arrive a little late (a late
+-- read changes the interval of the read after it, which is re-merged).
+-- Reads arriving later than the look-back need: dbt build --full-refresh
 
 with reads as (
 
     select * from {{ ref('stg_meter_reads') }}
+    {% if is_incremental() %}
+    where reading_ts > (
+        select max(reading_ts) - interval '{{ var("silver_lookback_days") }} days'
+        from {{ this }}
+    )
+    {% endif %}
 
 ),
 
@@ -38,5 +59,7 @@ select
     reading_ts - prev_reading_ts > interval '15 minutes'                   as is_gap_fill,
     kw_avg
 from with_previous
--- the very first read of each meter has nothing to subtract from
+-- the first read in the window has nothing to subtract from: on a full build
+-- that's each meter's very first read; on an incremental run it's a read that
+-- is already in the table from an earlier run
 where prev_reading_ts is not null

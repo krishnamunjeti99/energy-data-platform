@@ -4,8 +4,8 @@
 
 An end-to-end energy-meter data platform: a generator produces 15-minute meter
 reads, they land in a Postgres **bronze** layer, dbt transforms them into a
-**gold** layer, and a chart (later, a BI dashboard and an analyst agent) reads
-from gold.
+**gold** layer, and a dashboard reads from gold. Airflow runs it every night and
+CI tests every change.
 
 Built as a portfolio project covering Data Engineering, Data Analysis, and
 DevOps.
@@ -13,8 +13,9 @@ DevOps.
 ## Architecture (target)
 
 ```
-generator -> ingestion -> bronze -> silver -> gold -> BI dashboard + analyst agent
-                                   (dbt + orchestration + DQ tests)
+generator -> bronze -> silver -> gold -> dashboard
+              (dbt: incremental models, SCD2 snapshot, tests)
+              (Airflow: nightly schedule)   (GitHub Actions: CI)
 ```
 
 We build it as a thin vertical slice first, then grow outward.
@@ -27,6 +28,7 @@ We build it as a thin vertical slice first, then grow outward.
 - [x] Step 4 — dashboard on the gold layer
 - [x] Step 5 — CI: lint, unit tests, end-to-end pipeline test on every PR
 - [x] Step 6 — Airflow: the pipeline runs itself every night
+- [x] Step 7 — incremental models, SCD Type 2 snapshot, incremental == full-refresh check
 
 ---
 
@@ -244,3 +246,62 @@ docker compose up -d airflow     # first start takes ~1 minute
 ```
 
 If port 8090 is taken, set `AIRFLOW_PORT=8091` (or any free port) in `.env`.
+
+---
+
+## Step 7 — incremental models and SCD Type 2
+
+### Incremental silver and gold
+
+`silver_interval_energy` and `gold_daily_generation` are **incremental**: each
+run processes only recent data and merges it in, instead of rebuilding
+everything from bronze.
+
+| Model | Re-processes each run | Merge key |
+|---|---|---|
+| `silver_interval_energy` | reads from the last `silver_lookback_days` (2) | `read_key` |
+| `gold_daily_generation` | days from the last `gold_lookback_days` (3) | `(reading_date, station_id)` |
+
+The look-back windows exist for two reasons: `lag()` needs the previous read
+across the batch boundary, and reads that arrive a little late (or fill a gap)
+change the interval of the read after them, which then gets re-merged. Reads
+arriving later than the window need a one-off `dbt build --full-refresh`.
+
+**Proven, not assumed:** `scripts/verify_incremental.sh` runs an incremental
+build, saves the result, does a full rebuild from bronze, and compares the two
+row by row. CI runs it on every pull request after loading new data. With the
+look-back set to 0 it fails (the first new read of each meter is lost), which
+shows the check works.
+
+```bash
+# locally, after loading new data
+docker compose run --rm generator --days 1
+DBT="docker compose run --rm -T dbt" \
+PSQL="docker compose exec -T postgres psql -U energy -d energy" \
+scripts/verify_incremental.sh
+```
+
+### Station history (SCD Type 2)
+
+`snapshots/stations_snapshot.yml` records every change to the station master
+data (`seeds/stations.csv`). `dim_stations` turns that history into one row per
+station per version with `valid_from` / `valid_to` dates, and gold joins to the
+version **in effect on each day**:
+
+```
+station     version  capacity_mw  valid_from  valid_to    is_current
+STN-SOL-01  1        50           1900-01-01  2026-10-15  false
+STN-SOL-01  2        60           2026-10-15  9999-12-31  true
+```
+
+So when Sunfield Solar is upgraded from 50 to 60 MW, days before the upgrade
+keep their capacity factor at 50 MW, and only days from the upgrade onwards use
+60 MW. History is never rewritten. To try it, change the capacity in
+`dbt/seeds/stations.csv` and run `docker compose run --rm dbt build`.
+
+Tests added: one current version per station with no overlapping versions, and
+every station-day in silver reaches gold (so a missing version can't silently
+drop a day).
+
+dbt descriptions are also written into Postgres as table and column comments
+(`persist_docs`), so the documentation shows up in any SQL client.

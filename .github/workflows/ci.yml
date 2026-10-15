@@ -98,6 +98,34 @@ jobs:
       - name: Dashboard renders against gold
         run: pytest -v tests/test_dashboard.py
 
+      - name: Load 2 more days (new data for an incremental run)
+        run: python generator/generate_meter_reads.py --days 2
+
+      - name: "SCD Type 2: upgrade Sunfield Solar from 50 to 60 MW"
+        run: sed -i 's/^STN-SOL-01,Sunfield Solar,solar,50$/STN-SOL-01,Sunfield Solar,solar,60/' dbt/seeds/stations.csv
+
+      - name: Incremental models match a full rebuild exactly
+        env:
+          PGHOST: localhost
+          PGUSER: energy
+          PGPASSWORD: energy_pw
+          PGDATABASE: energy
+        run: |
+          command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+          scripts/verify_incremental.sh
+
+      - name: "SCD Type 2: history kept, capacity applied point-in-time"
+        env:
+          PGHOST: localhost
+          PGUSER: energy
+          PGPASSWORD: energy_pw
+          PGDATABASE: energy
+        run: |
+          versions=$(psql -qXtA -c "select count(*) from gold.dim_stations where station_id = 'STN-SOL-01'")
+          capacities=$(psql -qXtA -c "select string_agg(distinct capacity_mw::text, ',' order by capacity_mw::text) from gold.gold_daily_generation where station_id = 'STN-SOL-01'")
+          echo "versions=$versions capacities_used=$capacities"
+          test "$versions" = "2" && test "$capacities" = "50,60"
+
   airflow-dag:
     name: Airflow DAG loads and has the right shape
     runs-on: ubuntu-latest

@@ -1,15 +1,31 @@
--- Daily energy balance per station: the table the dashboard and the analyst
--- agent read from.
+{{
+    config(
+        materialized='incremental',
+        unique_key=['reading_date', 'station_id'],
+        incremental_strategy='merge',
+        on_schema_change='fail'
+    )
+}}
+
+-- Daily energy balance per station: the table the dashboard reads from.
+--
+-- Incremental: each run recomputes only the last `gold_lookback_days` days
+-- (a day can still change while late reads arrive) and merges them on
+-- (reading_date, station_id).
+--
+-- Point-in-time correct: capacity comes from the station version that was in
+-- effect on that day (dim_stations), so a capacity upgrade doesn't rewrite the
+-- capacity factor of days before it.
 
 with intervals as (
 
     select * from {{ ref('silver_interval_energy') }}
-
-),
-
-stations as (
-
-    select * from {{ ref('stations') }}
+    {% if is_incremental() %}
+    where reading_date >= (
+        select max(reading_date) - {{ var("gold_lookback_days") }}
+        from {{ this }}
+    )
+    {% endif %}
 
 ),
 
@@ -51,5 +67,8 @@ select
     round(100.0 * d.reads_received / (m.meter_count * 96), 2)           as completeness_pct,
     d.gap_fills
 from daily d
-join stations s           on s.station_id = d.station_id
+join {{ ref('dim_stations') }} s
+  on s.station_id = d.station_id
+ and d.reading_date >= s.valid_from
+ and d.reading_date <  s.valid_to
 join meters_per_station m on m.station_id = d.station_id
