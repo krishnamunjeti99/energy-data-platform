@@ -24,8 +24,10 @@ def test_no_import_errors(dagbag):
 
 
 def test_pipeline_shape(dagbag):
-    dag = dagbag.get_dag("energy_daily_pipeline")
-    assert dag is not None
+    # Read the parsed DAG directly: get_dag() would query Airflow's metadata
+    # database, which a structure test shouldn't need.
+    assert "energy_daily_pipeline" in dagbag.dags
+    dag = dagbag.dags["energy_daily_pipeline"]
     assert not dag.catchup
     assert dag.max_active_runs == 1
 

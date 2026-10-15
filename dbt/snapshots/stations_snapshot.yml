@@ -1,0 +1,12 @@
+snapshots:
+  - name: stations_snapshot
+    relation: ref('stations')
+    description: >
+      SCD Type 2 history of the station master data. Every time a station's
+      name, source or capacity changes in seeds/stations.csv, the old row is
+      closed (dbt_valid_to set) and a new current row is added.
+    config:
+      schema: snapshots
+      unique_key: station_id
+      strategy: check
+      check_cols: [station_name, source, capacity_mw]

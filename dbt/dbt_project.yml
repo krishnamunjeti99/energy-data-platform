@@ -7,11 +7,22 @@ model-paths: ["models"]
 seed-paths: ["seeds"]
 test-paths: ["tests"]
 macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
 target-path: "target"
 clean-targets: ["target", "dbt_packages"]
 
+vars:
+  # How far back incremental runs re-process, to absorb late-arriving reads
+  silver_lookback_days: 2
+  gold_lookback_days: 3
+
 models:
   energy_platform:
+    # Write descriptions into Postgres as table/column comments, so anyone
+    # browsing the warehouse in a SQL client sees what each column means.
+    +persist_docs:
+      relation: true
+      columns: true
     silver:
       +schema: silver
       +materialized: table

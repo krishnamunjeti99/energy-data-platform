@@ -1,6 +1,24 @@
 version: 2
 
 models:
+  - name: dim_stations
+    description: >
+      Station dimension with history (SCD Type 2) from stations_snapshot. One
+      row per station per version; valid_to is exclusive.
+    columns:
+      - name: station_id
+        data_tests: [not_null]
+      - name: version
+        description: 1 for the first recorded version, increasing with each change.
+      - name: capacity_mw
+        description: Installed capacity in effect during this version.
+      - name: valid_from
+        description: First day this version applies (inclusive).
+      - name: valid_to
+        description: Day this version stopped applying (exclusive); 9999-12-31 if current.
+      - name: is_current
+        description: True for the version in effect today.
+
   - name: gold_daily_generation
     description: Daily generation, auxiliary consumption and data completeness per station.
     columns:
@@ -21,7 +39,9 @@ models:
         description: generation_kwh - auxiliary_kwh.
       - name: aux_pct
         description: Auxiliary consumption as a % of generation.
+      - name: capacity_mw
+        description: Station capacity in effect on reading_date (point-in-time, from dim_stations).
       - name: capacity_factor_pct
-        description: Generation as a % of what the station could produce at full output all day.
+        description: Generation as a % of what the station could produce at full output all day, using the capacity in effect that day.
       - name: completeness_pct
         description: Reads received as a % of reads expected (96 per meter per day).
