@@ -26,6 +26,7 @@ We build it as a thin vertical slice first, then grow outward.
 - [x] Step 3 — dbt: bronze -> silver -> gold, with tests
 - [x] Step 4 — dashboard on the gold layer
 - [x] Step 5 — CI: lint, unit tests, end-to-end pipeline test on every PR
+- [x] Step 6 — Airflow: the pipeline runs itself every night
 
 ---
 
@@ -90,6 +91,7 @@ docker compose run --rm generator --days 1
 docker compose run --rm generator --help
 docker compose run --rm generator --reset --days 30   # wipe bronze and reload
 docker compose run --rm generator --clean --days 30   # no injected anomalies
+docker compose run --rm generator --catch-up          # load missing days up to yesterday; no-op if current
 ```
 
 Check what landed:
@@ -210,3 +212,35 @@ pip install -r requirements-dev.txt
 ruff check .
 pytest            # database tests skip unless POSTGRES_HOST is set
 ```
+
+---
+
+## Step 6 — orchestration with Airflow
+
+`airflow/dags/energy_daily_pipeline.py` runs the whole pipeline every night at
+01:30 India time:
+
+```
+load_meter_reads  ->  dbt_source_freshness  ->  dbt_build  ->  check_gold
+```
+
+| Task | What it does |
+|---|---|
+| `load_meter_reads` | `generator --catch-up`: loads every missing day up to yesterday; a no-op if bronze is current, so reruns never duplicate data, and a pipeline that was down for 3 days catches up on its own |
+| `dbt_source_freshness` | fails fast if bronze didn't actually receive new data |
+| `dbt_build` | rebuilds silver and gold and runs all dbt tests; a failing test fails the run, so bad data never silently reaches the dashboard |
+| `check_gold` | confirms yesterday is in gold (via an Airflow connection + `PostgresHook`) and logs completeness per station |
+
+Design choices:
+- **Retries** (2, two minutes apart) for transient failures like a database restart.
+- **`catchup=False` + an idempotent catch-up loader** instead of one Airflow run per missed day.
+- **`max_active_runs=1`** so two runs never write to bronze at the same time.
+- **Isolated virtualenv** for dbt and the generator inside the Airflow image, so their dependencies never clash with Airflow's.
+- **Standalone mode** (scheduler, UI, DAG processor and triggerer in one container, ~1.5 GB) with Airflow's metadata in the existing Postgres, to fit a laptop. The DAG code is identical to a production deployment.
+
+```bash
+docker compose up -d airflow     # first start takes ~1 minute
+# open http://localhost:8090, unpause energy_daily_pipeline, click Trigger
+```
+
+If port 8090 is taken, set `AIRFLOW_PORT=8091` (or any free port) in `.env`.

@@ -73,5 +73,66 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     restart: unless-stopped
 
+  # One-off helper: creates the "airflow" metadata database in the same Postgres
+  airflow-db-init:
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+    entrypoint: ["bash", "-c"]
+    command:
+      - psql -tAc "select 1 from pg_database where datname = 'airflow'" | grep -q 1 || psql -c "create database airflow"
+    restart: "no"
+
+  # Airflow in standalone mode: scheduler, web UI, DAG processor and triggerer in
+  # one container (~1.5 GB RAM), metadata in the existing Postgres.
+  #   docker compose up -d airflow   ->  http://localhost:8090
+  airflow:
+    build: ./airflow
+    container_name: energy_airflow
+    command: standalone
+    user: "${HOST_UID:-1000}:0"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-db-init:
+        condition: service_completed_successfully
+    ports:
+      - "${AIRFLOW_PORT:-8090}:8080"
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__PARALLELISM: "2"          # the pipeline runs one task at a time
+      AIRFLOW__API__WORKERS: "1"
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Kolkata
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"   # local dev: no login
+      # Airflow connection used by the check_gold task
+      AIRFLOW_CONN_ENERGY_WAREHOUSE: '{"conn_type": "postgres", "host": "postgres", "port": 5432, "login": "${POSTGRES_USER}", "password": "${POSTGRES_PASSWORD}", "schema": "${POSTGRES_DB}"}'
+      # Used by the generator and dbt when Airflow runs them
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      DBT_PROFILES_DIR: /opt/project/dbt
+      DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./generator:/opt/project/generator:ro
+      - ./dbt:/opt/project/dbt
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    restart: unless-stopped
+
 volumes:
   pgdata:
