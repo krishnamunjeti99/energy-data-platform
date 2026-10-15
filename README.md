@@ -1,307 +1,209 @@
 # Energy Data Platform
 
 [![CI](https://github.com/krishnamunjeti99/energy-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/krishnamunjeti99/energy-data-platform/actions/workflows/ci.yml)
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![dbt](https://img.shields.io/badge/dbt-1.12-FF694B?logo=dbt&logoColor=white)
+![Airflow](https://img.shields.io/badge/Airflow-3.3-017CEE?logo=apacheairflow&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)
 
-An end-to-end energy-meter data platform: a generator produces 15-minute meter
-reads, they land in a Postgres **bronze** layer, dbt transforms them into a
-**gold** layer, and a dashboard reads from gold. Airflow runs it every night and
-CI tests every change.
+An end-to-end data platform for **15-minute energy-meter data** from three
+generating stations (hydro, solar and wind). Raw meter reads land in a
+PostgreSQL **medallion warehouse** (bronze → silver → gold), are transformed and
+tested with **dbt** (incremental models, SCD Type 2 history, 23 data tests), and
+feed an analytics **dashboard**. **Airflow** runs the pipeline every night, and
+**GitHub Actions** tests every change end to end on a fresh database.
 
-Built as a portfolio project covering Data Engineering, Data Analysis, and
-DevOps.
-
-## Architecture (target)
-
-```
-generator -> bronze -> silver -> gold -> dashboard
-              (dbt: incremental models, SCD2 snapshot, tests)
-              (Airflow: nightly schedule)   (GitHub Actions: CI)
-```
-
-We build it as a thin vertical slice first, then grow outward.
-
-## Build progress
-
-- [x] Step 1 — Postgres running in Docker
-- [x] Step 2 — data generator -> bronze
-- [x] Step 3 — dbt: bronze -> silver -> gold, with tests
-- [x] Step 4 — dashboard on the gold layer
-- [x] Step 5 — CI: lint, unit tests, end-to-end pipeline test on every PR
-- [x] Step 6 — Airflow: the pipeline runs itself every night
-- [x] Step 7 — incremental models, SCD Type 2 snapshot, incremental == full-refresh check
+The domain comes from industrial power-monitoring systems: meters report
+cumulative energy registers, communications drop out, and reads arrive twice.
+The pipeline handles all of that explicitly instead of assuming clean data.
 
 ---
 
-## Step 1 — run Postgres
+## Architecture
 
-Prerequisites: Docker Desktop (or Docker Engine + Compose).
+```mermaid
+flowchart LR
+    subgraph control["Orchestration and CI"]
+        direction TB
+        airflow["Airflow 3<br/>nightly DAG, 01:30 IST"]
+        dbt["dbt Core<br/>models · snapshot · 23 tests"]
+        ci["GitHub Actions<br/>tests every pull request"]
+    end
 
-```bash
-# 1. create your env file from the template
-cp .env.example .env
+    gen["Meter-read generator<br/>7 meters · 15-min reads"]
 
-# 2. start Postgres in the background
-docker compose up -d
+    subgraph pg["PostgreSQL 16 · medallion warehouse"]
+        direction LR
+        bronze[("bronze<br/>raw reads")]
+        silver[("silver<br/>clean reads,<br/>interval energy")]
+        gold[("gold<br/>daily energy balance")]
+        seeds[("reference<br/>stations, meters")]
+        snap[("snapshots<br/>station history")]
+        bronze --> silver --> gold
+        seeds --> snap --> gold
+    end
 
-# 3. check it is healthy (STATUS should say "healthy")
-docker compose ps
+    dash["Streamlit<br/>dashboard"]
 
-# 4. connect and confirm
-docker compose exec postgres psql -U energy -d energy -c "select version();"
+    gen -->|COPY| bronze
+    gold --> dash
+    airflow -.-> gen
+    airflow -.-> dbt
+    dbt -.-> pg
+    ci -.-> pg
 ```
 
-If port 5432 is already taken on your machine (e.g. a local Postgres), set
-`POSTGRES_PORT=5433` in `.env`. Tools on your laptop then connect to
-`localhost:5433`; containers keep talking to each other on 5432.
-
-You should see the Postgres version string. That's it for Step 1 — the
-foundation is up.
-
-To stop: `docker compose down` (keeps data).
-To wipe data and start clean: `docker compose down -v`.
+Solid arrows are data; dotted arrows are control. Every night Airflow runs
+`load_meter_reads → dbt_source_freshness → dbt_build → check_gold`; dbt builds
+silver, the station snapshot and gold, and runs the tests. Everything runs in
+Docker Compose: `postgres`, `generator`, `dbt`, `dashboard` and `airflow`.
 
 ---
 
-## Step 2 — generate meter reads into bronze
+## Screenshots
 
-`generator/generate_meter_reads.py` simulates 15-minute interval reads from
-7 meters at three fictional stations and bulk-loads them into
-`bronze.meter_reads` with Postgres `COPY`.
+**Dashboard:** daily generation, auxiliary consumption and data completeness per station, read straight from the gold layer.
 
-| Station | Source | Capacity | Meters |
-|---|---|---|---|
-| STN-HYD-01 Riverbend Hydro | hydro (peaking) | 120 MW | 2 × GEN, 1 × AUX |
-| STN-SOL-01 Sunfield Solar | solar | 50 MW | 1 × GEN, 1 × AUX |
-| STN-WND-01 Windridge Wind | wind | 75 MW | 1 × GEN, 1 × AUX |
+![Dashboard](docs/images/dashboard.png)
 
-Each read carries a **cumulative energy register** (`kwh_register`, only ever
-increases), the block's average power (`kw_avg`), and `reading_ts` = the end
-of the 15-minute block. Interval energy is derived later from register deltas.
+**Airflow:** the nightly DAG (`load_meter_reads → dbt_source_freshness → dbt_build → check_gold`).
 
-Bronze is raw and append-only, and the generator deliberately injects real-world
-problems for the later layers to handle: dropped reads, multi-block comms
-outages, and duplicate reads.
+![Airflow DAG](docs/images/airflow-dag.png)
 
-```bash
-# build the image and load 30 days
-docker compose run --rm generator --days 30
+**dbt lineage:** bronze to gold, with the station snapshot and data tests.
 
-# run again with no --start: continues from the last loaded day (incremental)
-docker compose run --rm generator --days 1
-
-# other options
-docker compose run --rm generator --help
-docker compose run --rm generator --reset --days 30   # wipe bronze and reload
-docker compose run --rm generator --clean --days 30   # no injected anomalies
-docker compose run --rm generator --catch-up          # load missing days up to yesterday; no-op if current
-```
-
-Check what landed:
-
-```sql
--- reads per meter (96 per day, minus missing, plus duplicates)
-select meter_id, count(*) as reads, min(reading_ts), max(reading_ts)
-from bronze.meter_reads group by 1 order by 1;
-
--- duplicates that silver will need to remove
-select meter_id, reading_ts, count(*)
-from bronze.meter_reads group by 1, 2 having count(*) > 1;
-```
+![dbt lineage](docs/images/dbt-lineage.png)
 
 ---
 
-## Step 3 — transform with dbt (bronze -> silver -> gold)
+## Tech stack
 
-The `dbt/` project turns raw reads into analysis-ready tables:
-
-| Layer | Model | What it does |
-|---|---|---|
-| reference | `stations`, `meters` (seeds) | Station and meter master data from CSV |
-| silver | `stg_meter_reads` (view) | Removes duplicate reads: one row per meter per block |
-| silver | `silver_interval_energy` | Energy per interval from register deltas (`lag()`), flags gap-fills |
-| gold | `gold_daily_generation` | Daily generation, auxiliary %, capacity factor, data completeness per station |
-
-**Why register deltas?** Meters report a cumulative total, not per-block energy.
-Interval energy is `register - previous register`. A missing read loses no
-energy: the next read that arrives covers the gap (`blocks_covered > 1`), and
-the row is flagged `is_gap_fill` instead of being dropped or guessed.
-
-**Tests** (run with every build):
-- `unique` / `not_null` keys, `accepted_values` on meter type, `relationships` to the seeds
-- `assert_interval_energy_not_negative`: a cumulative register can never go backwards
-- `assert_one_row_per_station_per_day`: the grain of the gold table
-- `assert_aux_pct_within_bounds`: business rule, auxiliary use above 10% means bad metering
-- `warn_low_completeness`: warning (not failure) when a station sends < 95% of expected reads
-- source freshness on `bronze.meter_reads`
-
-```bash
-# seeds + models + tests, in dependency order
-docker compose run --rm dbt build
-
-# check that bronze data is recent
-docker compose run --rm dbt source freshness
-
-# browse docs and the lineage graph at http://localhost:8080
-docker compose run --rm dbt docs generate
-docker compose run --rm --service-ports dbt docs serve --host 0.0.0.0 --port 8080
-```
-
-Query the result:
-
-```sql
-select reading_date, station_name, generation_kwh, aux_pct,
-       capacity_factor_pct, completeness_pct
-from gold.gold_daily_generation
-order by reading_date desc, station_name
-limit 9;
-```
-
-dbt runs in its own container as your WSL user (`HOST_UID`, default 1000). If
-`id -u` prints something other than 1000, add `HOST_UID=<that number>` and
-`HOST_GID=<id -g>` to `.env`.
-
----
-
-## Step 4 — dashboard on the gold layer
-
-`dashboard/app.py` is a Streamlit app that reads only from
-`gold.gold_daily_generation`. All business logic lives in dbt; the dashboard
-just presents it.
-
-- **Headline numbers:** generation, net export, auxiliary consumption and data
-  completeness for the selected range. Ratios are weighted by energy, not
-  averaged per day, so a low-output day doesn't count as much as a full one.
-- **Daily generation** and **auxiliary consumption %** per station, as two
-  separate charts (one measure per chart, no dual axes), with a hover crosshair
-  listing every station's value for the day.
-- **Daily detail** table with capacity factor, completeness and gap fills.
-- Filters for date range and stations. Each station keeps its colour when
-  others are filtered out; the palette is colour-blind validated, with light
-  and dark variants.
-
-```bash
-docker compose up -d dashboard
-# open http://localhost:8501
-```
-
-If port 8501 is taken, set `DASHBOARD_PORT=8502` (or any free port) in `.env`.
-
-After loading new data, refresh the whole pipeline with:
-
-```bash
-docker compose run --rm generator --days 1   # next day of reads into bronze
-docker compose run --rm dbt build            # rebuild silver + gold, run tests
-# the dashboard picks up the new gold data within a minute
-```
-
----
-
-## Step 5 — continuous integration (GitHub Actions)
-
-`.github/workflows/ci.yml` runs on every pull request and every push to `main`:
-
-| Job | What it proves |
+| Area | Tools |
 |---|---|
-| **Lint + unit tests** | `ruff` passes; generator logic is correct (every block present in clean mode, registers never go backwards, anomalies are injected, same seed gives same data, solar is dark at night) |
-| **End-to-end pipeline** | Against a fresh Postgres: generate 30 days, run an incremental day, `dbt build` (all models + 20 tests), source freshness, and a smoke test that the dashboard renders from gold |
-| **Docker images build** | Every Dockerfile still builds |
+| Storage | PostgreSQL 16 (medallion: bronze, silver, gold, reference, snapshots) |
+| Ingestion | Python 3.12, psycopg 3 bulk `COPY` |
+| Transformation | dbt Core 1.12: incremental models (`merge`), snapshot (SCD2), seeds, `persist_docs` |
+| Data quality | 23 dbt tests (generic, singular, warn-level), source freshness |
+| Orchestration | Apache Airflow 3.3 (standalone, LocalExecutor) |
+| Analytics | Streamlit, Altair |
+| CI | GitHub Actions: ruff, pytest, end-to-end pipeline on a fresh Postgres, image builds |
+| Packaging | Docker Compose, non-root images, pinned dependencies |
 
-Run the same checks locally before pushing:
+---
+
+## Highlights and design decisions
+
+| Decision | Why |
+|---|---|
+| **Interval energy from cumulative registers** (`lag()` over each meter's reads) | Meters report running totals. A missing read loses no energy: the next read covers the gap, and the row is flagged `is_gap_fill` instead of being dropped or guessed. |
+| **Bronze is raw and append-only** | Duplicates and gaps are kept as delivered; silver deduplicates (`row_number()`) so every fix is traceable back to the source. |
+| **Incremental silver and gold** with look-back windows and `merge` | Each night processes only recent data. The look-back lets `lag()` see across the batch boundary and absorbs late reads. |
+| **Incremental == full refresh, verified** | `scripts/verify_incremental.sh` builds incrementally, rebuilds from scratch and compares row by row. CI runs it on every PR; with the look-back set to 0 it fails, which proves the check works. |
+| **SCD Type 2 station history** (dbt snapshot → `dim_stations`) | When a station's capacity changes, past days keep the capacity factor of the capacity in effect then. History is never rewritten. |
+| **Ratios weighted by energy**, not averaged per day | `sum(aux) / sum(generation)` instead of `avg(aux_pct)`, so a low-output day doesn't count as much as a full one. |
+| **Idempotent catch-up loader** + `catchup=False` in Airflow | Reruns never duplicate data, and a pipeline that was down for three days fills all three on its next run. |
+| **dbt and the generator in their own virtualenv** inside the Airflow image | Their dependencies never clash with Airflow's. |
+| **One measure per chart**, colour-blind-validated palette | No dual axes; each station keeps its colour when others are filtered out. |
+
+---
+
+## Data model
+
+| Layer | Object | Grain | Notes |
+|---|---|---|---|
+| bronze | `meter_reads` | one row per read as received | duplicates and gaps included |
+| silver | `stg_meter_reads` (view) | one row per meter per 15-min block | deduplicated |
+| silver | `silver_interval_energy` (incremental) | one row per meter per interval | energy from register deltas, gap flags |
+| reference | `stations`, `meters` (seeds) | master data | CSV in the repo |
+| snapshots | `stations_snapshot` | one row per station version | dbt snapshot, `check` strategy |
+| gold | `dim_stations` | one row per station version | `valid_from` / `valid_to` dates |
+| gold | `gold_daily_generation` (incremental) | one row per station per day | generation, auxiliary %, capacity factor, completeness |
+
+Model and column descriptions are written into Postgres as comments
+(`persist_docs`), so they show up in any SQL client.
+
+---
+
+## Testing
+
+| Level | What it checks | Where |
+|---|---|---|
+| Unit | generator: every block present, registers never decrease, anomalies injected, reproducible, solar dark at night | `tests/test_generator.py` |
+| Data | keys unique and not null, relationships, registers never go backwards, one row per station-day, auxiliary % plausible, every silver day reaches gold, SCD versions don't overlap, completeness warning | `dbt/models/**.yml`, `dbt/tests/` |
+| Freshness | bronze received data recently | `dbt source freshness` |
+| End to end | fresh Postgres → generate 30 days → catch-up is a no-op → `dbt build` → dashboard renders | CI `pipeline` job |
+| Incremental | incremental result identical to a full rebuild after new data and a capacity change | `scripts/verify_incremental.sh` |
+| Orchestration | DAG imports cleanly; tasks in the right order; `catchup=False`; one active run | `tests/test_dag.py` |
+| Packaging | every Docker image builds | CI `docker-build` job |
+
+---
+
+## Quickstart
+
+Requirements: Docker with Compose, and about 4 GB of RAM for Docker if you run Airflow.
+
+```bash
+git clone https://github.com/krishnamunjeti99/energy-data-platform.git
+cd energy-data-platform
+cp .env.example .env              # change POSTGRES_PORT if 5432 is in use
+
+docker compose up -d postgres
+docker compose run --rm generator --days 30     # 30 days of meter reads into bronze
+docker compose run --rm dbt build               # seeds, snapshot, models, tests
+docker compose up -d dashboard airflow
+```
+
+| Service | URL |
+|---|---|
+| Dashboard | http://localhost:8501 |
+| Airflow (unpause and trigger `energy_daily_pipeline`) | http://localhost:8090 |
+| dbt docs: `docker compose run --rm dbt docs generate`, then `docker compose run --rm --service-ports dbt docs serve --host 0.0.0.0 --port 8080` | http://localhost:8080 |
+
+Run the checks locally:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
-ruff check .
-pytest            # database tests skip unless POSTGRES_HOST is set
+ruff check . && pytest
 ```
 
 ---
 
-## Step 6 — orchestration with Airflow
-
-`airflow/dags/energy_daily_pipeline.py` runs the whole pipeline every night at
-01:30 India time:
+## Project structure
 
 ```
-load_meter_reads  ->  dbt_source_freshness  ->  dbt_build  ->  check_gold
+.
+├── generator/            meter-read simulator → bronze (Python, COPY)
+├── dbt/
+│   ├── models/silver/    deduplication, interval energy (incremental)
+│   ├── models/gold/      dim_stations, daily energy balance (incremental)
+│   ├── snapshots/        station history (SCD Type 2)
+│   ├── seeds/            station and meter master data
+│   └── tests/            singular data tests
+├── airflow/dags/         nightly pipeline DAG
+├── dashboard/            Streamlit app on the gold layer
+├── scripts/              verify_incremental.sh
+├── tests/                pytest: generator, DAG, dashboard
+├── docs/                 build log and screenshots
+├── .github/workflows/    CI
+└── docker-compose.yml
 ```
-
-| Task | What it does |
-|---|---|
-| `load_meter_reads` | `generator --catch-up`: loads every missing day up to yesterday; a no-op if bronze is current, so reruns never duplicate data, and a pipeline that was down for 3 days catches up on its own |
-| `dbt_source_freshness` | fails fast if bronze didn't actually receive new data |
-| `dbt_build` | rebuilds silver and gold and runs all dbt tests; a failing test fails the run, so bad data never silently reaches the dashboard |
-| `check_gold` | confirms yesterday is in gold (via an Airflow connection + `PostgresHook`) and logs completeness per station |
-
-Design choices:
-- **Retries** (2, two minutes apart) for transient failures like a database restart.
-- **`catchup=False` + an idempotent catch-up loader** instead of one Airflow run per missed day.
-- **`max_active_runs=1`** so two runs never write to bronze at the same time.
-- **Isolated virtualenv** for dbt and the generator inside the Airflow image, so their dependencies never clash with Airflow's.
-- **Standalone mode** (scheduler, UI, DAG processor and triggerer in one container, ~1.5 GB) with Airflow's metadata in the existing Postgres, to fit a laptop. The DAG code is identical to a production deployment.
-
-```bash
-docker compose up -d airflow     # first start takes ~1 minute
-# open http://localhost:8090, unpause energy_daily_pipeline, click Trigger
-```
-
-If port 8090 is taken, set `AIRFLOW_PORT=8091` (or any free port) in `.env`.
 
 ---
 
-## Step 7 — incremental models and SCD Type 2
+## Roadmap
 
-### Incremental silver and gold
+- **AWS deployment with Terraform:** raw reads in S3, the warehouse on RDS
+  PostgreSQL or Redshift, infrastructure as code.
+- Streaming ingestion for near-real-time reads.
 
-`silver_interval_energy` and `gold_daily_generation` are **incremental**: each
-run processes only recent data and merges it in, instead of rebuilding
-everything from bronze.
+---
 
-| Model | Re-processes each run | Merge key |
-|---|---|---|
-| `silver_interval_energy` | reads from the last `silver_lookback_days` (2) | `read_key` |
-| `gold_daily_generation` | days from the last `gold_lookback_days` (3) | `(reading_date, station_id)` |
+## Build log
 
-The look-back windows exist for two reasons: `lag()` needs the previous read
-across the batch boundary, and reads that arrive a little late (or fill a gap)
-change the interval of the read after them, which then gets re-merged. Reads
-arriving later than the window need a one-off `dbt build --full-refresh`.
+The project was built in small steps, each a pull request with CI.
+[docs/build-log.md](docs/build-log.md) has every step with its commands and
+reasoning.
 
-**Proven, not assumed:** `scripts/verify_incremental.sh` runs an incremental
-build, saves the result, does a full rebuild from bronze, and compares the two
-row by row. CI runs it on every pull request after loading new data. With the
-look-back set to 0 it fails (the first new read of each meter is lost), which
-shows the check works.
-
-```bash
-# locally, after loading new data
-docker compose run --rm generator --days 1
-DBT="docker compose run --rm -T dbt" \
-PSQL="docker compose exec -T postgres psql -U energy -d energy" \
-scripts/verify_incremental.sh
-```
-
-### Station history (SCD Type 2)
-
-`snapshots/stations_snapshot.yml` records every change to the station master
-data (`seeds/stations.csv`). `dim_stations` turns that history into one row per
-station per version with `valid_from` / `valid_to` dates, and gold joins to the
-version **in effect on each day**:
-
-```
-station     version  capacity_mw  valid_from  valid_to    is_current
-STN-SOL-01  1        50           1900-01-01  2026-10-15  false
-STN-SOL-01  2        60           2026-10-15  9999-12-31  true
-```
-
-So when Sunfield Solar is upgraded from 50 to 60 MW, days before the upgrade
-keep their capacity factor at 50 MW, and only days from the upgrade onwards use
-60 MW. History is never rewritten. To try it, change the capacity in
-`dbt/seeds/stations.csv` and run `docker compose run --rm dbt build`.
-
-Tests added: one current version per station with no overlapping versions, and
-every station-day in silver reaches gold (so a missing version can't silently
-drop a day).
-
-dbt descriptions are also written into Postgres as table and column comments
-(`persist_docs`), so the documentation shows up in any SQL client.
+The stations are fictional and all data is simulated.
